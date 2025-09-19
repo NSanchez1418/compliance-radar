@@ -153,6 +153,13 @@ def render():
                     bar1.progress(int((i+1)/len(df)*100))
                 bar1.empty()
                 df = pd.DataFrame(out)
+                # Vista previa de Zero-shot
+st.caption("Vista previa (Zero-shot)")
+st.dataframe(
+    df[["relato", "tipo_predicho", "score_tipo"]].head(min(len(df), 10)),
+    use_container_width=True,
+)
+
 
                 # 2) NER + regex
                 st.markdown("### 2) Entidades (NER) + Montos/Fechas (Regex)")
@@ -176,6 +183,13 @@ def render():
                 df["entidades"] = ents_col
                 df["montos"] = montos_col
                 df["fechas"] = fechas_col
+# Vista previa de NER + regex
+st.caption("Vista previa (Entidades + Montos/Fechas)")
+st.dataframe(
+    df[["relato", "entidades", "montos", "fechas"]].head(min(len(df), 10)),
+    use_container_width=True,
+)
+
 
                 # 3) Riesgo
                 st.markdown("### 3) Prioridad (Reglas de riesgo)")
@@ -206,5 +220,6 @@ def render():
 # Permite ejecutar en local con: python -m streamlit run compliance_app.py
 if __name__ == "__main__":
     render()
+
 
 
