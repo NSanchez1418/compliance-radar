@@ -1,24 +1,22 @@
 # -*- coding: utf-8 -*-
 import os, time, requests, streamlit as st
 
-# ---- UI base ----
+# Solo aquí se define page_config (una sola vez)
 st.set_page_config(page_title="Compliance Radar — Launcher", layout="wide")
+
 st.sidebar.title("Launcher")
 mode = st.sidebar.radio("Elige modo", ["🔎 Diagnóstico IA", "🚀 App completa"], index=0)
 
-# ---- Token (común) ----
+# Token común
 try:
     from dotenv import load_dotenv; load_dotenv(override=True)
 except Exception:
     pass
-
 HF_TOKEN = (st.secrets.get("HUGGINGFACEHUB_API_TOKEN")
             or os.getenv("HUGGINGFACEHUB_API_TOKEN") or "").strip()
 HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
-# =======================
-# MODO 1: DIAGNÓSTICO IA
-# =======================
+# ============ MODO DIAGNÓSTICO ============
 if mode.startswith("🔎"):
     st.title("🔎 Diagnóstico IA (Hugging Face)")
     st.write("Token OK:", HF_TOKEN.startswith("hf_"))
@@ -30,7 +28,6 @@ if mode.startswith("🔎"):
     )
 
     col1, col2 = st.columns(2)
-
     with col1:
         if st.button("Probar ZERO-SHOT"):
             try:
@@ -72,16 +69,18 @@ if mode.startswith("🔎"):
 
     st.info('Si ambos botones funcionan, cambia el radio a "🚀 App completa".')
 
-# =======================
-# MODO 2: APP COMPLETA
-# =======================
+# ============ MODO APP COMPLETA ============
 else:
     st.title("🚀 Lanzando app completa…")
     try:
-        import compliance_app  # tu app real (compliance_app.py) se carga aquí
+        import compliance_app
+        with st.spinner("Cargando interfaz…"):
+            compliance_app.render()   # <<< IMPORTANTÍSIMO: SOLO LLAMAMOS A LA FUNCIÓN
+        st.success("App cargada.")
     except Exception as e:
         st.error("❌ Error al iniciar la aplicación completa. Detalle abajo:")
         st.exception(e)
-        st.info("Vuelve al modo '🔎 Diagnóstico IA' para verificar el token/modelos.")
+        st.info("Vuelve al modo '🔎 Diagnóstico IA' para verificar token/modelos.")
+
 
 
