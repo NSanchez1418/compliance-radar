@@ -14,14 +14,38 @@ st.set_page_config(page_title="Compliance Radar", layout="wide")
 st.title("Compliance Radar FF.AA. — MVP")
 st.caption("Registro y triage de incidentes (Ejército, Marina, Aviación; tropa y oficiales).")
 
-HF_TOKEN = (
-    st.secrets.get("HUGGINGFACEHUB_API_TOKEN")
-    or os.getenv("HUGGINGFACEHUB_API_TOKEN")
-    or ""
-).strip()
-if not HF_TOKEN.startswith("hf_"):
-    st.warning("Configura HUGGINGFACEHUB_API_TOKEN en Secrets (Cloud) o .env (local).")
+# ---- Controles de ejecución (barra lateral) ----
+# IA real por defecto (modo seguro = OFF)
+SAFE_MODE = st.sidebar.toggle("🛟 Modo seguro (sin IA)", value=False)
+N_MAX = st.sidebar.number_input("Máximo de filas a procesar", min_value=1, max_value=200, value=20, step=1)
+
+# Diagnóstico rápido de token/modelos (opcional)
+with st.sidebar.expander("Diagnóstico HuggingFace"):
+    # token
+    HF_TOKEN = (
+        st.secrets.get("HUGGINGFACEHUB_API_TOKEN")
+        or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+        or ""
+    ).strip()
+    st.write("Token OK:", HF_TOKEN.startswith("hf_"))
+    # prueba rápida (sin bloquear analítica)
+    test_txt = st.text_area("Texto de prueba", "Intento de soborno de $500 en Quito...", height=80)
+    if st.button("Probar IA ahora"):
+        try:
+            z = requests.post(
+                "https://api-inference.huggingface.co/models/joeddav/xlm-roberta-large-xnli",
+                headers={"Authorization": f"Bearer {HF_TOKEN}"},
+                json={"inputs": test_txt, "parameters":{"candidate_labels":["soborno/coima","amenaza/coacción"],"multi_label":False}, "options":{"wait_for_model": True}},
+                timeout=60
+            ).json()
+            st.write("Zero-shot (labels/scores):", list(zip(z.get("labels",[]), z.get("scores",[])))[:3] if isinstance(z, dict) else z)
+        except Exception as e:
+            st.error(f"Zero-shot error: {e}")
+
+# Si no hay token, avisamos (la app igual funciona en modo seguro)
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+if not HF_TOKEN.startswith("hf_"):
+    st.warning("Configura HUGGINGFACEHUB_API_TOKEN en Secrets (Cloud) o .env (local) para usar IA.")
 
 # --- Modelos ---
 ZERO_SHOT = "joeddav/xlm-roberta-large-xnli"                  # zero-shot multilingüe
@@ -37,9 +61,11 @@ LABELS = [
 def hf_zero_shot(text, labels=LABELS):
     if not HF_HEADERS: return []
     url = f"https://api-inference.huggingface.co/models/{ZERO_SHOT}"
-    payload = {"inputs": text[:2000],
-               "parameters":{"candidate_labels":labels,"multi_label":False},
-               "options":{"wait_for_model": True}}
+    payload = {
+        "inputs": text[:2000],
+        "parameters":{"candidate_labels":labels,"multi_label":False},
+        "options":{"wait_for_model": True}
+    }
     r = requests.post(url, headers=HF_HEADERS, json=payload, timeout=60)
     if r.status_code == 503:
         time.sleep(2); r = requests.post(url, headers=HF_HEADERS, json=payload, timeout=60)
@@ -50,9 +76,11 @@ def hf_zero_shot(text, labels=LABELS):
 def hf_ner(text):
     if not HF_HEADERS: return []
     url = f"https://api-inference.huggingface.co/models/{NER_MODEL}"
-    payload = {"inputs": text[:2000],
-               "parameters":{"aggregation_strategy":"simple"},
-               "options":{"wait_for_model": True}}
+    payload = {
+        "inputs": text[:2000],
+        "parameters":{"aggregation_strategy":"simple"},
+        "options":{"wait_for_model": True}
+    }
     r = requests.post(url, headers=HF_HEADERS, json=payload, timeout=60)
     if r.status_code == 503:
         time.sleep(2); r = requests.post(url, headers=HF_HEADERS, json=payload, timeout=60)
@@ -125,35 +153,44 @@ with tabs[1]:
     )
     if file:
         df = pd.read_csv(file)
+        df = df.head(int(N_MAX))  # límite de filas
         req = {"rama","grado","unidad","provincia","canton","fecha_incidente","relato"}
         if not req.issubset(df.columns):
             st.error(f"Faltan columnas: {req - set(df.columns)}")
             st.stop()
 
+        # 1) Zero-shot
         st.markdown("### 1) Tipo de incidente (Zero-shot)")
         out = []
         bar1 = st.progress(0, text="Clasificando…")
         for i, row in df.iterrows():
             text = str(row["relato"])
-            try:
-                zs = hf_zero_shot(text)
-            except Exception as e:
-                st.error(f"Zero-shot error: {e}"); zs = []
-            tipo, score = (zs[0][0], float(zs[0][1])) if zs else ("otros", 0.0)
+            if SAFE_MODE:
+                tipo, score = ("otros", 0.0)
+            else:
+                try:
+                    zs = hf_zero_shot(text)
+                except Exception as e:
+                    st.error(f"Zero-shot error: {e}"); zs = []
+                tipo, score = (zs[0][0], float(zs[0][1])) if zs else ("otros", 0.0)
             out.append({**row.to_dict(), "tipo_predicho": tipo, "score_tipo": round(score,3)})
             bar1.progress(int((i+1)/len(df)*100))
         bar1.empty()
         df = pd.DataFrame(out)
 
+        # 2) NER + regex
         st.markdown("### 2) Entidades (NER) + Montos/Fechas (Regex)")
         ents_col, montos_col, fechas_col = [], [], []
         bar2 = st.progress(0, text="Extrayendo…")
         for i, row in df.iterrows():
             text = str(row["relato"])
-            try:
-                ents = hf_ner(text)
-            except Exception as e:
-                st.error(f"NER error: {e}"); ents = []
+            if SAFE_MODE:
+                ents = []
+            else:
+                try:
+                    ents = hf_ner(text)
+                except Exception as e:
+                    st.error(f"NER error: {e}"); ents = []
             fields = extract_fields(text)
             ents_col.append(", ".join({w for w,t,_ in ents if t in ("ORG","PER","LOC")}))
             montos_col.append(", ".join(fields["montos"]))
@@ -164,6 +201,7 @@ with tabs[1]:
         df["montos"] = montos_col
         df["fechas"] = fechas_col
 
+        # 3) Riesgo
         st.markdown("### 3) Prioridad (Reglas de riesgo)")
         risks = []
         for _, row in df.iterrows():
@@ -171,6 +209,7 @@ with tabs[1]:
             risks.append(risk_score(row["tipo_predicho"], str(row["relato"]), raw_dates))
         df["riesgo"] = risks
 
+        # 4) Resumen + descarga
         col1, col2 = st.columns(2)
         with col1:
             st.write("**Conteo por tipo**")
@@ -186,5 +225,3 @@ with tabs[1]:
                            file_name="incidentes_priorizados.csv", mime="text/csv")
     else:
         st.info("Sube el CSV para comenzar.")
-
-
