@@ -3,8 +3,6 @@ import os, time, re, datetime as dt, requests
 import pandas as pd
 import streamlit as st
 
-# NO set_page_config aquí (solo en app.py)
-
 # -------------------- Carga de variables / Token --------------------
 try:
     from dotenv import load_dotenv
@@ -18,8 +16,8 @@ HF_TOKEN = (st.secrets.get("HUGGINGFACEHUB_API_TOKEN")
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN.startswith("hf_") else {}
 
 # -------------------- Modelos y utilidades --------------------
-ZERO_SHOT = "joeddav/xlm-roberta-large-xnli"                 # clasificador zero-shot multilingüe
-NER_MODEL = "Davlan/bert-base-multilingual-cased-ner-hrl"    # NER PER/ORG/LOC multilingüe
+ZERO_SHOT = "joeddav/xlm-roberta-large-xnli"                 # zero-shot multilingüe
+NER_MODEL = "Davlan/bert-base-multilingual-cased-ner-hrl"    # NER PER/ORG/LOC/MISC
 
 LABELS = [
     "soborno/coima","amenaza/coacción","contacto con mafia",
@@ -28,7 +26,6 @@ LABELS = [
 ]
 
 def hf_zero_shot(text, labels=LABELS, timeout=25, retries=2):
-    """Clasificación zero-shot vía Hugging Face Inference API."""
     if not HF_HEADERS: return []
     url = f"https://api-inference.huggingface.co/models/{ZERO_SHOT}"
     payload = {
@@ -40,8 +37,7 @@ def hf_zero_shot(text, labels=LABELS, timeout=25, retries=2):
     for _ in range(retries + 1):
         try:
             r = requests.post(url, headers=HF_HEADERS, json=payload, timeout=timeout)
-            if r.status_code in (503, 429):
-                time.sleep(2); continue
+            if r.status_code in (503, 429): time.sleep(2); continue
             r.raise_for_status()
             out = r.json()
             return list(zip(out.get("labels", []), out.get("scores", []))) if isinstance(out, dict) else []
@@ -50,7 +46,6 @@ def hf_zero_shot(text, labels=LABELS, timeout=25, retries=2):
     raise RuntimeError(f"Zero-shot falló: {last_err}")
 
 def hf_ner(text, timeout=25, retries=2):
-    """Reconocimiento de entidades nombradas (PER/ORG/LOC)."""
     if not HF_HEADERS: return []
     url = f"https://api-inference.huggingface.co/models/{NER_MODEL}"
     payload = {
@@ -62,8 +57,7 @@ def hf_ner(text, timeout=25, retries=2):
     for _ in range(retries + 1):
         try:
             r = requests.post(url, headers=HF_HEADERS, json=payload, timeout=timeout)
-            if r.status_code in (503, 429):
-                time.sleep(2); continue
+            if r.status_code in (503, 429): time.sleep(2); continue
             r.raise_for_status()
             out = r.json()
             if isinstance(out, list):
@@ -78,7 +72,7 @@ MONEY_RE = re.compile(r"\$?\s?([0-9]{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)")
 DATE_RE  = re.compile(r"\b(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})\b")
 VIOLENCE = {"arma","amenaza","disparo","golpe","intimidación","secuestr","extors"}
 
-def extract_fields(text):
+def extract_fields_from_relato(text):
     return {"montos": MONEY_RE.findall(text)[:5], "fechas": DATE_RE.findall(text)[:5]}
 
 def parse_dates_found(raw_dates):
@@ -91,16 +85,22 @@ def parse_dates_found(raw_dates):
             except: pass
     return parsed
 
-def risk_score(tipo, text, raw_dates):
+def risk_score(tipo, text, raw_dates_relato, fecha_incidente_date):
     score = 0
     if tipo in {"amenaza/coacción","contacto con mafia"}: score += 3
     if tipo in {"soborno/coima","narcotráfico","minería ilegal",
                 "tráfico de combustibles","contrabando"}: score += 2
     if MONEY_RE.search(text): score += 1
     if any(w in text.lower() for w in VIOLENCE): score += 1
-    parsed = parse_dates_found(raw_dates)
+
     today = dt.date.today()
-    if any((today - d).days <= 7 for d in parsed): score += 1
+    # priorizamos recencia usando primero la fecha_incidente (columna), luego fechas del relato
+    if isinstance(fecha_incidente_date, dt.date) and (today - fecha_incidente_date).days <= 7:
+        score += 1
+    else:
+        parsed_relato = parse_dates_found(raw_dates_relato)
+        if any((today - d).days <= 7 for d in parsed_relato):
+            score += 1
     return score
 
 # -------------------- Render principal --------------------
@@ -114,7 +114,7 @@ def render():
 
     tabs = st.tabs(["Reportar incidente", "Analizar (CSV)"])
 
-    # -------- Tab 1: captura y descarga de un registro --------
+    # -------- Tab 1: captura --------
     with tabs[0]:
         st.subheader("Reportar incidente")
         with st.form("f"):
@@ -138,7 +138,7 @@ def render():
             st.download_button("Descargar CSV", df.to_csv(index=False).encode("utf-8"),
                                file_name="incidentes_compliance.csv", mime="text/csv")
 
-    # -------- Tab 2: análisis con IA --------
+    # -------- Tab 2: análisis --------
     with tabs[1]:
         st.subheader("Analizar CSV")
         file = st.file_uploader(
@@ -156,20 +156,22 @@ def render():
                 st.error(f"Faltan columnas: {req - set(df.columns)}")
                 return
 
+            # Normalizamos fecha_incidente a date
+            df["fecha_incidente"] = pd.to_datetime(df["fecha_incidente"], errors="coerce").dt.date
+
             # ===== 1) Zero-shot =====
             st.markdown("### 1) Tipo de incidente (Zero-shot)")
             out, bar1 = [], st.progress(0, text="Clasificando…")
             for i, row in df.iterrows():
-                text = str(row["relato"])
+                texto_relato = str(row["relato"])
                 if SAFE_MODE or not HF_HEADERS:
                     tipo, score = ("otros", 0.0)
                 else:
                     try:
-                        zs = hf_zero_shot(text)
+                        zs = hf_zero_shot(texto_relato)
                         tipo, score = (zs[0][0], float(zs[0][1])) if zs else ("otros", 0.0)
                     except Exception as e:
-                        st.warning(f"[Fila {i+1}] Zero-shot: {e}")
-                        tipo, score = ("otros", 0.0)
+                        st.warning(f"[Fila {i+1}] Zero-shot: {e}"); tipo, score = ("otros", 0.0)
                 out.append({**row.to_dict(),
                             "tipo_predicho": tipo,
                             "score_tipo": round(score, 3)})
@@ -177,53 +179,71 @@ def render():
             bar1.empty()
             df = pd.DataFrame(out)
 
-            # ---- Vista previa Zero-shot ----
             st.caption("Vista previa (Zero-shot)")
-            st.dataframe(
-                df[["relato", "tipo_predicho", "score_tipo"]].head(min(len(df), 10)),
-                use_container_width=True,
-            )
+            st.dataframe(df[["relato","tipo_predicho","score_tipo"]].head(min(len(df), 10)),
+                         use_container_width=True)
 
             # ===== 2) NER + regex =====
             st.markdown("### 2) Entidades (NER) + Montos/Fechas (Regex)")
             ents_col, montos_col, fechas_col = [], [], []
             bar2 = st.progress(0, text="Extrayendo…")
             for i, row in df.iterrows():
-                text = str(row["relato"])
+                # NER sobre relato + ubicación/unidad para traer LOC/ORG
+                texto_ner = " ".join([
+                    str(row.get("relato","")),
+                    f"Unidad: {row.get('unidad','')}",
+                    f"Provincia: {row.get('provincia','')}",
+                    f"Cantón: {row.get('canton','')}",
+                ]).strip()
+
                 if SAFE_MODE or not HF_HEADERS:
                     ents = []
                 else:
                     try:
-                        ents = hf_ner(text)
+                        ents = hf_ner(texto_ner)
                     except Exception as e:
-                        st.warning(f"[Fila {i+1}] NER: {e}")
-                        ents = []
-                fields = extract_fields(text)
-                ents_col.append(", ".join({w for w,t,_ in ents if t in ("ORG","PER","LOC")}))
+                        st.warning(f"[Fila {i+1}] NER: {e}"); ents = []
+
+                # Regex desde el relato
+                fields = extract_fields_from_relato(str(row.get("relato","")))
+
+                # Construimos 'fechas' combinando las del relato + fecha_incidente (columna)
+                fechas_list = list(fields["fechas"])
+                if isinstance(row["fecha_incidente"], dt.date):
+                    fechas_list.append(row["fecha_incidente"].isoformat())
+
+                # Guardamos columnas
+                ALLOWED = {"ORG","PER","LOC","MISC"}
+                ents_fmt = [f"{w}({t})" for (w,t,_) in ents if t in ALLOWED]
+                ents_col.append(", ".join(ents_fmt))
                 montos_col.append(", ".join(fields["montos"]))
-                fechas_col.append(", ".join(fields["fechas"]))
+                fechas_col.append(", ".join(fechas_list))
+
                 bar2.progress(int((i+1)/len(df)*100))
             bar2.empty()
             df["entidades"] = ents_col
             df["montos"] = montos_col
             df["fechas"] = fechas_col
 
-            # ---- Vista previa NER + regex ----
             st.caption("Vista previa (Entidades + Montos/Fechas)")
-            st.dataframe(
-                df[["relato", "entidades", "montos", "fechas"]].head(min(len(df), 10)),
-                use_container_width=True,
-            )
+            st.dataframe(df[["relato","entidades","montos","fechas"]].head(min(len(df), 10)),
+                         use_container_width=True)
 
             # ===== 3) Riesgo =====
             st.markdown("### 3) Prioridad (Reglas de riesgo)")
             risks = []
             for _, row in df.iterrows():
-                raw_dates = row["fechas"].split(", ") if row["fechas"] else []
-                risks.append(risk_score(row["tipo_predicho"], str(row["relato"]), raw_dates))
+                raw_dates_relato = extract_fields_from_relato(str(row["relato"]))["fechas"]
+                risks.append(
+                    risk_score(
+                        row["tipo_predicho"],
+                        str(row["relato"]),
+                        raw_dates_relato,
+                        row["fecha_incidente"]
+                    )
+                )
             df["riesgo"] = risks
 
-            # ===== 4) Resumen + descarga =====
             c1, c2 = st.columns(2)
             with c1:
                 st.write("**Conteo por tipo**")
@@ -233,7 +253,8 @@ def render():
                 st.dataframe(df.sort_values(["riesgo","score_tipo"], ascending=False).head(10))
 
             st.markdown("### 4) Tabla completa (ordenada por riesgo)")
-            st.dataframe(df.sort_values(["riesgo","score_tipo"], ascending=False), use_container_width=True)
+            st.dataframe(df.sort_values(["riesgo","score_tipo"], ascending=False),
+                         use_container_width=True)
 
             st.download_button("Descargar resultados (CSV)",
                                df.to_csv(index=False).encode("utf-8"),
@@ -244,9 +265,9 @@ def render():
             st.error("❌ Error general durante el análisis. Detalle:")
             st.exception(e)
 
-# Permite ejecutar en local con: python -m streamlit run compliance_app.py
 if __name__ == "__main__":
     render()
+
 
 
 
