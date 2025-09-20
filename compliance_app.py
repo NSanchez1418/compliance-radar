@@ -252,14 +252,24 @@ def render():
                 st.write("**Top-10 por riesgo**")
                 st.dataframe(df.sort_values(["riesgo","score_tipo"], ascending=False).head(10))
 
-            st.markdown("### 4) Tabla completa (ordenada por riesgo)")
-            st.dataframe(df.sort_values(["riesgo","score_tipo"], ascending=False),
-                         use_container_width=True)
+                st.markdown("### 4) Tabla completa (ordenada por riesgo)")
 
-            st.download_button("Descargar resultados (CSV)",
-                               df.to_csv(index=False).encode("utf-8"),
-                               file_name="incidentes_priorizados.csv",
-                               mime="text/csv")
+            # Orden final
+           df_final = df.sort_values(["riesgo", "score_tipo"], ascending=False)
+
+            # Muestra tabla
+                st.dataframe(df_final, use_container_width=True)
+
+            # CSV con BOM (Excel-friendly) + nombre con fecha + clave única
+            csv_bytes = df_final.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    label="Descargar resultados (CSV)",
+                    data=csv_bytes,
+                    file_name=f"incidentes_priorizados_{dt.date.today().isoformat()}.csv",
+                    mime="text/csv",
+                    key="dl_resultados",
+                    )
+
 
         except Exception as e:
             st.error("❌ Error general durante el análisis. Detalle:")
@@ -267,6 +277,7 @@ def render():
 
 if __name__ == "__main__":
     render()
+
 
 
 
